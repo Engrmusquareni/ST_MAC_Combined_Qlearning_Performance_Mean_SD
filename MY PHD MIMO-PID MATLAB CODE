@@ -1,0 +1,831 @@
+%% ROBUST DECOUPLED MIMO-PID ANALYSIS
+
+% MATLAB R2021a + Control System Toolbox
+
+%
+
+% Includes:
+
+% 1. Decoupled MIMO-PID step responses
+
+% 2. Closed-loop pole and stability analysis
+
+% 3. IAE for both output channels
+
+% 4. Rise time, settling time and overshoot
+
+% 5. Cross-channel response analysis
+
+% 6. Stability and performance summary tables
+
+% 7. CSV and MAT exports
+
+
+clear; clc; close all;
+
+format compact;
+
+
+s = tf('s');
+
+
+%% 1. PLANT PARAMETER SETS
+
+P = {
+
+    [87.8 -86.4; 108.2 -109.6]
+
+    [87.7 -86.5; 108.1 -109.7]
+
+    [87.6 -86.6; 108.0 -109.8]
+
+};
+
+
+gain_values = 0.8:0.2:2.6;
+
+N = numel(gain_values);
+
+
+colors = lines(N);
+
+t = linspace(0,1200,4000);
+
+
+%% 2. PID CONTROLLER
+
+% Starting parameters, not claimed optimum values
+
+Kp = 4;
+
+Ki = 2;
+
+Kd = 0.2;
+
+Tf = 0.01;
+
+
+PID = Kp + Ki/s + Kd*s/(Tf*s + 1);
+
+
+%% 3. STORAGE
+
+T_results = cell(N,1);
+
+G_results = cell(N,1);
+
+C_results = cell(N,1);
+
+L_results = cell(N,1);
+
+Poles_results = cell(N,1);
+
+
+stableFlag = false(N,1);
+
+AnalysisCompleted = false(N,1);
+
+
+% Performance columns:
+
+% Gain, rise/settling/overshoot for yL and yV,
+
+% maximum closed-loop pole real part
+
+Results = nan(N,8);
+
+
+% Additional stability and IAE metrics
+
+IAE_yL = nan(N,1);
+
+IAE_yV = nan(N,1);
+
+MaxPoleRealPart = nan(N,1);
+
+NumClosedLoopPoles = nan(N,1);
+
+DC_T12 = nan(N,1);
+
+DC_T21 = nan(N,1);
+
+ConditionNumber = nan(N,1);
+
+
+%% 4. CONSTRUCT AND ANALYSE EACH SYSTEM
+
+for k = 1:N
+
+
+    gain = gain_values(k);
+
+
+    if gain <= 66
+
+        K = P{1};
+
+    elseif gain <= 72
+
+        K = P{2};
+
+    else
+
+        K = P{3};
+
+    end
+
+
+    fprintf('\n========================================\n');
+
+    fprintf('PLANT GAIN = %g\n',gain);
+
+    fprintf('========================================\n');
+
+
+    try
+
+        %% 4.1 PLANT MODEL
+
+        G = K/(gain*s + 1);
+
+
+        ConditionNumber(k) = cond(K);
+
+
+        if rcond(K) < 1e-10
+
+            error('Plant matrix is singular or ill-conditioned.');
+
+        end
+
+
+        %% 4.2 STATIC DECOUPLER
+
+        D = inv(K);
+
+
+        % Decoupled controller
+
+        C = minreal(D*blkdiag(PID,PID));
+
+
+        %% 4.3 OPEN-LOOP AND CLOSED-LOOP MODELS
+
+        L = minreal(G*C);
+
+        T = minreal(feedback(L,eye(2)));
+
+
+        G_results{k} = G;
+
+        C_results{k} = C;
+
+        L_results{k} = L;
+
+        T_results{k} = T;
+
+        %% 4.3A FREQUENCY-RESPONSE PLOTS FOR THIS GAIN
+        % Closed-loop Bode plot, open-loop maximum/minimum singular-value
+        % (loop-gain) plot, and generalized/cyclic MIMO Nyquist plot.
+        % The previous closed-loop time/oscillation plots are removed.
+
+        %% 4.3A.1 CLOSED-LOOP BODE PLOT
+        try
+            figure('Color','w', ...
+                'Name',sprintf('Closed-Loop Bode - Gain %g',gain));
+            bodeplot(T);
+            grid on;
+            sgtitle(sprintf( ...
+                'Closed-Loop Bode Plot - Plant Gain = %g',gain));
+        catch MEbode
+            warning('Bode plot failed at gain %g: %s', ...
+                gain,MEbode.message);
+        end
+
+        %% 4.3A.2 OPEN-LOOP CG: MINIMUM AND MAXIMUM LOOP GAINS
+        % Plot the largest and smallest singular values of L(jw), plus
+        % sensitivity/complementary-sensitivity singular values. These
+        % are useful MIMO loop-gain diagnostics; they are not a substitute
+        % for a looptune Info object or its exact loopview display.
+        try
+            wplot = logspace(-3,2,800);
+            svL = sigma(L,wplot);
+            svS = sigma(feedback(eye(2),L),wplot);
+            svT = sigma(feedback(L,eye(2)),wplot);
+
+            % sigma() commonly returns [frequency x singular-value] data.
+            % Normalize dimensions defensively for plotting.
+            svL = squeeze(svL);
+            svS = squeeze(svS);
+            svT = squeeze(svT);
+            if size(svL,1) ~= numel(wplot) && size(svL,2) == numel(wplot)
+                svL = svL.';
+            end
+            if size(svS,1) ~= numel(wplot) && size(svS,2) == numel(wplot)
+                svS = svS.';
+            end
+            if size(svT,1) ~= numel(wplot) && size(svT,2) == numel(wplot)
+                svT = svT.';
+            end
+
+            figure('Color','w', ...
+                'Name',sprintf('Open-Loop CG Max-Min Loop Gain - Gain %g',gain));
+
+            subplot(3,1,1);
+            semilogx(wplot,20*log10(max(svL,[],2)),'b','LineWidth',1.7);
+            hold on;
+            semilogx(wplot,20*log10(min(svL,[],2)),'Color',[0.35 0.35 1], ...
+                'LineWidth',1.7);
+            yline(0,'k--','0 dB');
+            grid on; box on;
+            ylabel('Singular values (dB)');
+            title(sprintf('Open-loop CG: Minimum and Maximum Loop Gains (Gain = %g)',gain));
+            legend('Maximum loop gain','Minimum loop gain','Location','best');
+            hold off;
+
+            subplot(3,1,2);
+            semilogx(wplot,20*log10(max(svS,[],2)),'g','LineWidth',1.5);
+            hold on;
+            semilogx(wplot,20*log10(max(svT,[],2)),'r','LineWidth',1.5);
+            yline(0,'k--');
+            grid on; box on;
+            ylabel('Singular value (dB)');
+            title('Sensitivity and Complementary Sensitivity');
+            legend('Maximum singular value of S','Maximum singular value of T', ...
+                'Location','best');
+            hold off;
+
+            subplot(3,1,3);
+            try
+                % MATLAB versions supporting diskmarginplot can display
+                % disk-based loop margins in a separate figure.
+                figure('Color','w', ...
+                    'Name',sprintf('Disk-Based Stability Margins - Gain %g',gain));
+                diskmarginplot(L);
+                grid on;
+                title(sprintf('Disk-Based Stability Margins - Plant Gain = %g',gain));
+            catch
+                % Fallback: show minimum singular value of I+L as a
+                % frequency-dependent distance-to-criticality indicator.
+                svIplusL = sigma(eye(2)+L,wplot);
+                svIplusL = squeeze(svIplusL);
+                if size(svIplusL,1) ~= numel(wplot) && size(svIplusL,2) == numel(wplot)
+                    svIplusL = svIplusL.';
+                end
+                semilogx(wplot,20*log10(min(svIplusL,[],2)),'b','LineWidth',1.5);
+                grid on; box on;
+                xlabel('Frequency (rad/s)');
+                ylabel('Minimum singular value (dB)');
+                title('Distance from the Critical Condition: Minimum Singular Value of I+L');
+            end
+
+        catch MEloopgain
+            warning('Open-loop CG plot failed at gain %g: %s', ...
+                gain,MEloopgain.message);
+        end
+
+        %% 4.3A.3 CONVENTIONAL MIMO NYQUIST PLOT
+        % nyquistplot(L) plots the conventional input-output MIMO Nyquist
+        % array (From/To channels), matching the four-panel style requested.
+        try
+            figure('Color','w', ...
+                'Name',sprintf('MIMO Nyquist Diagram - Gain %g',gain));
+            nyquistplot(L);
+            grid on;
+            sgtitle(sprintf('Nyquist Diagram - Plant Gain = %g',gain));
+        catch MEnyquist
+            warning('MIMO Nyquist plot failed at gain %g: %s', ...
+                gain,MEnyquist.message);
+        end
+
+        %% 4.4 CLOSED-LOOP POLES AND STABILITY
+
+        polesT = pole(T);
+
+        Poles_results{k} = polesT;
+
+
+        if isempty(polesT) || any(~isfinite(polesT))
+
+            warning('Invalid closed-loop poles at gain %g.',gain);
+
+            continue;
+
+        end
+
+
+        NumClosedLoopPoles(k) = numel(polesT);
+
+        MaxPoleRealPart(k) = max(real(polesT));
+
+
+        % Continuous-time asymptotic stability criterion
+
+        stableFlag(k) = all(real(polesT) < -1e-8);
+
+        AnalysisCompleted(k) = true;
+
+
+        fprintf('Plant condition number = %.8g\n',ConditionNumber(k));
+
+        fprintf('Maximum pole real part = %.8g\n',MaxPoleRealPart(k));
+
+
+        if stableFlag(k)
+
+            fprintf('Stability: STABLE\n');
+
+        else
+
+            fprintf('Stability: UNSTABLE OR MARGINAL\n');
+
+            disp('Closed-loop poles:');
+
+            disp(polesT);
+
+        end
+
+
+        %% 4.5 CROSS-CHANNEL DC GAINS
+
+        DC_T12(k) = dcgain(T(1,2));
+
+        DC_T21(k) = dcgain(T(2,1));
+
+
+        fprintf('DC gain T12 = %.8g\n',DC_T12(k));
+
+        fprintf('DC gain T21 = %.8g\n',DC_T21(k));
+
+
+        %% 4.6 STEP RESPONSE PERFORMANCE
+
+        % Calculate IAE and stepinfo only for stable systems.
+
+        if stableFlag(k)
+
+
+            % Simulate diagonal closed-loop responses over 0-1200 s.
+
+            yL = squeeze(step(T(1,1),t));
+
+            yV = squeeze(step(T(2,2),t));
+
+
+            yL = yL(:);
+
+            yV = yV(:);
+
+
+            if numel(yL) ~= numel(t) || numel(yV) ~= numel(t)
+
+                error('Unexpected step-response dimensions.');
+
+            end
+
+
+            % Unit-step tracking errors
+
+            eL = 1 - yL;
+
+            eV = 1 - yV;
+
+
+            % Integral of absolute error over the simulation horizon
+
+            IAE_yL(k) = trapz(t(:),abs(eL));
+
+            IAE_yV(k) = trapz(t(:),abs(eV));
+
+
+            % Step-response characteristics
+
+            S1 = stepinfo(T(1,1));
+
+            S2 = stepinfo(T(2,2));
+
+
+            Results(k,:) = [gain, ...
+                S1.RiseTime,S1.SettlingTime,S1.Overshoot, ...
+                S2.RiseTime,S2.SettlingTime,S2.Overshoot, ...
+                MaxPoleRealPart(k)];
+
+
+            fprintf('\nyL performance:\n');
+
+            fprintf('Rise time = %.8g s\n',S1.RiseTime);
+
+            fprintf('Settling time = %.8g s\n',S1.SettlingTime);
+
+            fprintf('Overshoot = %.8g %%\n',S1.Overshoot);
+
+            fprintf('IAE_yL = %.8g\n',IAE_yL(k));
+
+
+            fprintf('\nyV performance:\n');
+
+            fprintf('Rise time = %.8g s\n',S2.RiseTime);
+
+            fprintf('Settling time = %.8g s\n',S2.SettlingTime);
+
+            fprintf('Overshoot = %.8g %%\n',S2.Overshoot);
+
+            fprintf('IAE_yV = %.8g\n',IAE_yV(k));
+
+
+        else
+
+            fprintf(['IAE and step-response performance metrics ', ...
+                'omitted because the closed loop is unstable ', ...
+                'or marginal.\n']);
+
+        end
+
+
+    catch ME
+
+        fprintf(2,'ERROR at gain %g: %s\n',gain,ME.message);
+
+        fprintf(2,'Analysis for this gain is incomplete.\n');
+
+    end
+
+end
+
+
+%% 5. PLOT yL STEP RESPONSES
+
+figure('Color','w','Name','Decoupled MIMO-PID: yL');
+
+hold on; grid on; box on;
+
+
+for k = 1:N
+
+    if stableFlag(k) && ~isempty(T_results{k})
+
+        y = squeeze(step(T_results{k}(1,1),t));
+
+
+        plot(t(:),y(:),'Color',colors(k,:), ...
+            'LineWidth',1.5, ...
+            'DisplayName',sprintf('Gain = %g',gain_values(k)));
+
+    end
+
+end
+
+
+title('Decoupled MIMO-PID: Output y_L');
+
+xlabel('Time (s)');
+
+ylabel('y_L');
+
+
+if any(stableFlag)
+
+    legend('show','Location','best');
+
+else
+
+    text(0.5,0.5,'No stable responses available', ...
+        'Units','normalized','HorizontalAlignment','center');
+
+end
+
+hold off;
+
+
+%% 6. PLOT yV STEP RESPONSES
+
+figure('Color','w','Name','Decoupled MIMO-PID: yV');
+
+hold on; grid on; box on;
+
+
+for k = 1:N
+
+    if stableFlag(k) && ~isempty(T_results{k})
+
+        y = squeeze(step(T_results{k}(2,2),t));
+
+
+        plot(t(:),y(:),'Color',colors(k,:), ...
+            'LineWidth',1.5, ...
+            'DisplayName',sprintf('Gain = %g',gain_values(k)));
+
+    end
+
+end
+
+
+title('Decoupled MIMO-PID: Output y_V');
+
+xlabel('Time (s)');
+
+ylabel('y_V');
+
+
+if any(stableFlag)
+
+    legend('show','Location','best');
+
+else
+
+    text(0.5,0.5,'No stable responses available', ...
+        'Units','normalized','HorizontalAlignment','center');
+
+end
+
+hold off;
+
+
+%% 7. CROSS-CHANNEL RESPONSES
+
+figure('Color','w','Name','Cross-Channel Responses');
+
+
+subplot(2,1,1);
+
+hold on; grid on; box on;
+
+
+for k = 1:N
+
+    if stableFlag(k) && ~isempty(T_results{k})
+
+        y = squeeze(step(T_results{k}(1,2),t));
+
+
+        plot(t(:),y(:),'Color',colors(k,:), ...
+            'LineWidth',1.3, ...
+            'DisplayName',sprintf('Gain = %g',gain_values(k)));
+
+    end
+
+end
+
+
+title('Cross-channel response: r_V to y_L');
+
+xlabel('Time (s)');
+
+ylabel('y_L');
+
+
+if any(stableFlag)
+
+    legend('show','Location','best');
+
+end
+
+hold off;
+
+
+subplot(2,1,2);
+
+hold on; grid on; box on;
+
+
+for k = 1:N
+
+    if stableFlag(k) && ~isempty(T_results{k})
+
+        y = squeeze(step(T_results{k}(2,1),t));
+
+
+        plot(t(:),y(:),'Color',colors(k,:), ...
+            'LineWidth',1.3, ...
+            'DisplayName',sprintf('Gain = %g',gain_values(k)));
+
+    end
+
+end
+
+
+title('Cross-channel response: r_L to y_V');
+
+xlabel('Time (s)');
+
+ylabel('y_V');
+
+
+if any(stableFlag)
+
+    legend('show','Location','best');
+
+end
+
+hold off;
+
+
+%% 8. IAE COMPARISON PLOT
+
+figure('Color','w','Name','IAE Comparison');
+
+
+plot(gain_values,IAE_yL,'b-o','LineWidth',1.5);
+
+hold on; grid on; box on;
+
+
+plot(gain_values,IAE_yV,'r-s','LineWidth',1.5);
+
+
+xlabel('Plant gain');
+
+ylabel('Integral of absolute error');
+
+title('IAE Comparison Across Plant Gains');
+
+legend('IAE yL','IAE yV','Location','best');
+
+hold off;
+
+
+%% 9. STABILITY TABLE
+
+StabilityStatus = repmat({'NOT ANALYSED'},N,1);
+
+
+for k = 1:N
+
+    if AnalysisCompleted(k)
+
+        if stableFlag(k)
+
+            StabilityStatus{k} = 'STABLE';
+
+        else
+
+            StabilityStatus{k} = 'UNSTABLE/MARGINAL';
+
+        end
+
+    end
+
+end
+
+
+StabilityTable = table( ...
+    gain_values(:), ...
+    StabilityStatus, ...
+    ConditionNumber, ...
+    NumClosedLoopPoles, ...
+    MaxPoleRealPart, ...
+    DC_T12, ...
+    DC_T21, ...
+    'VariableNames',{ ...
+    'Gain','Stability','PlantConditionNumber', ...
+    'NumClosedLoopPoles','MaxPoleRealPart', ...
+    'DCGain_T12','DCGain_T21'});
+
+
+disp(' ');
+
+disp('==============================================');
+
+disp('CLOSED-LOOP STABILITY TABLE');
+
+disp('==============================================');
+
+disp(StabilityTable);
+
+
+%% 10. PERFORMANCE AND IAE TABLE
+
+PerformanceTable = array2table(Results, ...
+    'VariableNames',{ ...
+    'Gain', ...
+    'RiseTime_yL','SettlingTime_yL','Overshoot_yL', ...
+    'RiseTime_yV','SettlingTime_yV','Overshoot_yV', ...
+    'MaxPoleRealPart'});
+
+
+PerformanceTable.IAE_yL = IAE_yL;
+
+PerformanceTable.IAE_yV = IAE_yV;
+
+
+disp(' ');
+
+disp('==============================================');
+
+disp('STEP RESPONSE AND IAE PERFORMANCE TABLE');
+
+disp('==============================================');
+
+disp(PerformanceTable);
+
+
+%% 11. COMBINED STABILITY AND PERFORMANCE TABLE
+
+CombinedTable = table( ...
+    gain_values(:), ...
+    StabilityStatus, ...
+    MaxPoleRealPart, ...
+    IAE_yL, ...
+    IAE_yV, ...
+    Results(:,2), ...
+    Results(:,3), ...
+    Results(:,4), ...
+    Results(:,5), ...
+    Results(:,6), ...
+    Results(:,7), ...
+    DC_T12, ...
+    DC_T21, ...
+    'VariableNames',{ ...
+    'Gain','Stability','MaxPoleRealPart', ...
+    'IAE_yL','IAE_yV', ...
+    'RiseTime_yL','SettlingTime_yL','Overshoot_yL', ...
+    'RiseTime_yV','SettlingTime_yV','Overshoot_yV', ...
+    'DCGain_T12','DCGain_T21'});
+
+
+disp(' ');
+
+disp('========================================================');
+
+disp('COMBINED STABILITY AND PERFORMANCE SUMMARY');
+
+disp('========================================================');
+
+disp(CombinedTable);
+
+
+%% 12. SAVE RESULTS
+
+homeFolder = getenv('USERPROFILE');
+
+
+if isempty(homeFolder)
+
+    homeFolder = getenv('HOME');
+
+end
+
+
+if isempty(homeFolder)
+
+    outDir = pwd;
+
+else
+
+    outDir = fullfile(homeFolder,'Documents');
+
+
+    if ~exist(outDir,'dir')
+
+        outDir = pwd;
+
+    end
+
+end
+
+
+stabilityFile = fullfile(outDir,'MIMO_PID_Stability_Table.csv');
+
+performanceFile = fullfile(outDir,'MIMO_PID_Performance_IAE_Table.csv');
+
+combinedFile = fullfile(outDir,'MIMO_PID_Combined_Stability_Performance.csv');
+
+matFile = fullfile(outDir,'MIMO_PID_Complete_Results.mat');
+
+
+writetable(StabilityTable,stabilityFile);
+
+writetable(PerformanceTable,performanceFile);
+
+writetable(CombinedTable,combinedFile);
+
+
+save(matFile, ...
+    'P','gain_values','T_results','G_results','C_results','L_results', ...
+    'Poles_results','stableFlag','AnalysisCompleted', ...
+    'Results','IAE_yL','IAE_yV','MaxPoleRealPart', ...
+    'NumClosedLoopPoles','DC_T12','DC_T21','ConditionNumber', ...
+    'StabilityTable','PerformanceTable','CombinedTable', ...
+    'Kp','Ki','Kd','Tf');
+
+
+fprintf('\n==============================================\n');
+
+fprintf('ANALYSIS COMPLETED\n');
+
+fprintf('==============================================\n');
+
+fprintf('Stability table:\n%s\n',stabilityFile);
+
+fprintf('Performance and IAE table:\n%s\n',performanceFile);
+
+fprintf('Combined summary table:\n%s\n',combinedFile);
+
+fprintf('Complete MATLAB results:\n%s\n',matFile);
+
+fprintf('Output directory:\n%s\n',outDir);
+
+fprintf(['\nIAE is calculated over the finite 0-1200 s ', ...
+    'simulation horizon. Unstable systems have NaN IAE ', ...
+    'and step-performance values.\n']);
+
